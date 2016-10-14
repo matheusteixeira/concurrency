@@ -47,14 +47,16 @@ typedef struct {
     double fx, fy, fz;
 } ParticleV;
 
-typedef struct {
-  Particle particles;
-  ParticleV pv;
+struct particles_data{
+  Particle* myparticles;
+  Particle* others;
+  ParticleV* pv;
   int npart;
-}particles_params;
+  int id;
+};
 
 void InitParticles( Particle[], ParticleV [], int );
-double ComputeForces( Particle [], Particle [], ParticleV [], int );
+double ComputeForces( void *thread_data );
 double ComputeNewPos( Particle [], ParticleV [], int, double);
 
 
@@ -68,42 +70,42 @@ int main(int argc, char **argv)
     double      sim_t;       /* Simulation time */
 
     pthread_t threads[n_threads];
+  	int threads_id[n_threads];
 
     int tmp;
     if(argc != 4){
-		printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps\n");
-		exit(1);
-	}
+  		printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps num_of_threads\n");
+    	exit(1);
+	  }
 
-	npart = atoi(argv[1]);
-	cnt = atoi(argv[2]);
-  n_threads = atoi(argv[3]);
+  	npart = atoi(argv[1]);
+  	cnt = atoi(argv[2]);
+    n_threads = atoi(argv[3]);
 
-  dt = 0.001;
-	dt_old = 0.001;
-
-  particles_params params[n_threads];
-
+    dt = 0.001;
+  	dt_old = 0.001;
 
     /* Allocate memory for particles */
     particles = (Particle *) malloc(sizeof(Particle)*npart);
     pv = (ParticleV *) malloc(sizeof(ParticleV)*npart);
 
-    /* should create a struct with the params and send a different value for each thread using indexes*/
-	/* create an array of params where each of has the types defined above */
-	/* (void*)&params[i] and define the params inside the called function */
-  i = 0;
+    i = 0;
 
-    for(i = 0; i < n_threads; i++) {
-      params[i].particles = particles[i];
-      params[i].pv = pv[i];
-      params[i].npart = npart;
-      pthread_create(&threads[i], NULL, InitParticles, (void *) &params[i]);
-    }
+   struct particles_data *data;
 
-    for(i = 0; i < n_threads; i++){
-      pthread_join(threads[i], NULL);
-    }
+   data = malloc(sizeof(struct particles_data));
+   data->npart = npart;
+   data->myparticles = particles;
+   data->others = particles;
+   data->pv = pv;
+
+      for(i = 0; i < n_threads; i++) {
+        pthread_create(&threads[i], NULL, ComputeForces, (void*)data);
+      }
+
+      for(i = 0; i < n_threads; i++){
+        pthread_join(threads[i], NULL);
+      }
 
 
     /* Generate the initial values */
@@ -113,7 +115,8 @@ int main(int argc, char **argv)
     while (cnt--) {
       double max_f;
       /* Compute forces (2D only) */
-      max_f = ComputeForces( particles, particles, pv, npart );
+
+      max_f = ComputeForces( data );
       /* Once we have the forces, we compute the changes in position */
       sim_t += ComputeNewPos( particles, pv, npart, max_f);
     }
@@ -139,12 +142,21 @@ void InitParticles(Particle particles[], ParticleV pv[], int npart)
     }
 }
 
-double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[], int npart )
+double ComputeForces( void *thread_data )
 {
+  struct particles_data *received_data = thread_data;
+
   double max_f;
   int i;
   max_f = 0.0;
-  for (i=0; i<npart; i++) {
+
+  int npart = received_data->npart;
+  Particle* myparticles = received_data->myparticles;
+  Particle* others = received_data->others;
+  ParticleV* pv = received_data->pv;
+  int id = received_data->id;
+
+  for (i=0; i<npart - id ; i++) {
     int j;
     double xi, yi, mi, rx, ry, mj, r, fx, fy, rmin;
     rmin = 100.0;
