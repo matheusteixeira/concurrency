@@ -12,7 +12,10 @@
 #define DEFAULT    123456789
 
 static long seed = DEFAULT;
+int n_threads;
 double dt, dt_old; /* Alterado de static para global */
+double max_f;
+pthread_mutex_t global_var_mutex;
 
 double Random(void)
 /* ----------------------------------------------------------------
@@ -51,13 +54,15 @@ struct particles_data{
   Particle* myparticles;
   Particle* others;
   ParticleV* pv;
-  int npart;
-  int id;
+  int npart, id;
+  int start, end;
 };
+
+typedef struct { int start, end; } batches;
 
 void InitParticles( Particle[], ParticleV [], int );
 double ComputeForces( void *thread_data );
-double ComputeNewPos( Particle [], ParticleV [], int, double);
+double ComputeNewPos( void *thread_data );
 
 
 int main(int argc, char **argv)
@@ -66,11 +71,10 @@ int main(int argc, char **argv)
     ParticleV * pv;          /* Particle velocity */
     int         npart, i, j;
     int         cnt;         /* number of times in loop */
-    int         n_threads;   /* number of threads to be created*/
     double      sim_t;       /* Simulation time */
 
     pthread_t threads[n_threads];
-  	int threads_id[n_threads];
+    pthread_mutex_init(&global_var_mutex, NULL);
 
     int tmp;
     if(argc != 4){
@@ -89,39 +93,48 @@ int main(int argc, char **argv)
     particles = (Particle *) malloc(sizeof(Particle)*npart);
     pv = (ParticleV *) malloc(sizeof(ParticleV)*npart);
 
-    i = 0;
-
    struct particles_data *data;
-
    data = malloc(sizeof(struct particles_data));
-   data->npart = npart;
-   data->myparticles = particles;
-   data->others = particles;
-   data->pv = pv;
 
+    /* Generate the initial values */
+    InitParticles( particles, pv, npart);
+
+    while (cnt--) {
+      //compute forces
       for(i = 0; i < n_threads; i++) {
+        data->npart = npart;
+        data->myparticles = particles;
+        data->others = particles;
+        data->pv = pv;
+        data->start = i*(npart/n_threads);
+        data->end = i*(npart/n_threads) + (npart/n_threads);
         pthread_create(&threads[i], NULL, ComputeForces, (void*)data);
       }
 
       for(i = 0; i < n_threads; i++){
         pthread_join(threads[i], NULL);
       }
-
-
-    /* Generate the initial values */
-    InitParticles( particles, pv, npart);
-    sim_t = 0.0;
-
-    while (cnt--) {
-      double max_f;
-      /* Compute forces (2D only) */
-
-      max_f = ComputeForces( data );
       /* Once we have the forces, we compute the changes in position */
-      sim_t += ComputeNewPos( particles, pv, npart, max_f);
+      for(i = 0; i < n_threads; i++) {
+        data->npart = npart;
+        data->myparticles = particles;
+        data->others = particles;
+        data->pv = pv;
+        data->start = i*(npart/n_threads);
+        data->end = i*(npart/n_threads) + (npart/n_threads);
+        pthread_create(&threads[i], NULL, ComputeNewPos, (void*)data);
+      }
+
+      for(i = 0; i < n_threads; i++){
+        pthread_join(threads[i], NULL);
+      }
     }
     for (i=0; i<npart; i++)
       fprintf(stdout,"%.5lf %.5lf\n", particles[i].x, particles[i].y);
+
+    pthread_mutex_destroy(&global_var_mutex);
+    pthread_exit(NULL);
+    free(data);
     return 0;
 }
 
@@ -146,7 +159,6 @@ double ComputeForces( void *thread_data )
 {
   struct particles_data *received_data = thread_data;
 
-  double max_f;
   int i;
   max_f = 0.0;
 
@@ -154,9 +166,11 @@ double ComputeForces( void *thread_data )
   Particle* myparticles = received_data->myparticles;
   Particle* others = received_data->others;
   ParticleV* pv = received_data->pv;
-  int id = received_data->id;
 
-  for (i=0; i<npart - id ; i++) {
+  int start = received_data->start;
+  int end = received_data->end;
+
+  for (i = start; i <  end; i++) {
     int j;
     double xi, yi, mi, rx, ry, mj, r, fx, fy, rmin;
     rmin = 100.0;
@@ -164,7 +178,7 @@ double ComputeForces( void *thread_data )
     yi   = myparticles[i].y;
     fx   = 0.0;
     fy   = 0.0;
-    for (j=0; j<npart; j++) {
+    for (j= start; j < end; j++) {
       rx = xi - others[j].x;
       ry = yi - others[j].y;
       mj = others[j].mass;
@@ -179,20 +193,33 @@ double ComputeForces( void *thread_data )
     pv[i].fx += fx;
     pv[i].fy += fy;
     fx = sqrt(fx*fx + fy*fy)/rmin;
+    pthread_mutex_lock (&global_var_mutex);
     if (fx > max_f) max_f = fx;
+    pthread_mutex_unlock (&global_var_mutex);
+    pthread_exit((void*) 0);
   }
   return max_f;
 }
 
-double ComputeNewPos( Particle particles[], ParticleV pv[], int npart, double max_f)
+double ComputeNewPos( void *thread_data )
 {
+  struct particles_data *received_data = thread_data;
+
+  Particle* particles = received_data->myparticles;
+  ParticleV* pv = received_data->pv;
+
+  int start = received_data->start;
+  int end = received_data->end;
+
   int i;
   double a0, a1, a2;
   double dt_new;
+
   a0	 = 2.0 / (dt * (dt + dt_old));
   a2	 = 2.0 / (dt_old * (dt + dt_old));
   a1	 = -(a0 + a2);
-  for (i=0; i<npart; i++) {
+
+  for (i=start; i < end; i++) {
     double xi, yi;
     xi	           = particles[i].x;
     yi	           = particles[i].y;
@@ -207,13 +234,15 @@ double ComputeNewPos( Particle particles[], ParticleV pv[], int npart, double ma
   /* Set a minimum: */
   if (dt_new < 1.0e-6) dt_new = 1.0e-6;
   /* Modify time step */
+  pthread_mutex_lock (&global_var_mutex);
   if (dt_new < dt) {
     dt_old = dt;
     dt     = dt_new;
   }
   else if (dt_new > 4.0 * dt) {
-    dt_old = dt;
+      dt_old = dt;
     dt    *= 2.0;
   }
+  pthread_mutex_unlock (&global_var_mutex);
   return dt_old;
 }
