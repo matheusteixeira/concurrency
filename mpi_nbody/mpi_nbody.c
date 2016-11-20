@@ -14,7 +14,7 @@
 static long seed = DEFAULT;
 double dt, dt_old; /* Alterado de static para global */
 int *buffer, *global_buffer;
-int batch_size, batch_start, batch_end;
+int batch_size, batch_start, batch_end, ns_remainder;
 int rank, size;
 double global_max_f;
 
@@ -52,7 +52,7 @@ typedef struct {
 } ParticleV;
 
 void InitParticles( Particle[], ParticleV [], int );
-double ComputeForces( Particle [], Particle [], ParticleV [], int , int, int);
+double ComputeForces( Particle [], Particle [], ParticleV [], int );
 double ComputeNewPos( Particle [], ParticleV [], int, double);
 
 int main(int argc, char **argv)
@@ -74,8 +74,8 @@ int main(int argc, char **argv)
     global_buffer = calloc(npart, sizeof(int));
 
     if(argc != 3){
-		    printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps\n");
-		    exit(1);
+	    printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps\n");
+	    exit(1);
 	  }
 
     npart = atoi(argv[1]);
@@ -91,86 +91,30 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    batch_size = (npart/size);
-    int ns_remainder = npart % size;
-
-      if (rank == 0) {
-        for (int i = 1; i < size; i++) {
-            /*
-            MPI_RECv Params:
-            buf: ponteiro para o dado a ser recebido
-            count: num de elementos a serem recebidos
-            dtype: tipo dos elementos
-            src: rank do remetente
-            tag: um num para classificar msgs (de quem vai receber)
-            comm: comunicador
-            status: infos sobre a mensagem recebida
-            */
-            MPI_Recv(global_buffer, npart, MPI_INT, i, 0, MPI_COMM_WORLD, NULL);
-            /*
-            Note that MPI_STATUS_IGNORE is not a special type of MPI_STATUS object;
-            rather, it is a special value for the argument.
-            In C one would expect it to be NULL, not the address of a special MPI_STATUS.
-            http://mpi-forum.org/docs/mpi-2.0/mpi-20-html/node47.htm
-            */
-
-            batch_start = batch_size * i;
-            batch_end = batch_start + batch_size - 1;
-
-            if (i == size - 1) {
-              //avoid skipping elements when there's a odd size
-              batch_end += ns_remainder;
-            }
-
-            for (int j = batch_start; j < batch_end; j++) {
-              buffer[j] = global_buffer[j];
-            }
-        }
-      } else {
-        /*
-        MPI_Send Params:
-        buf: ponteiro para o dado a ser enviado
-        count: num de elementos a serem enviados
-        dtype: tipo de elementos do buffer
-        dest: rank do destinatário
-        tag: num para classificar mensagens
-        comm: MPI Communicator
-        */
-        MPI_Send(buffer, npart, MPI_INT, 0, 0, MPI_COMM_WORLD);
-      }
-
-      /*
-      Broadcasts a message from the process with rank 0 to all other processes of the group.
-      */
-      MPI_Bcast(buffer, npart, MPI_INT, 0, MPI_COMM_WORLD);
-
     /* Generate the initial values */
     InitParticles( particles, pv, npart);
     sim_t = 0.0;
 
     while (cnt--) {
-      double max_f;
+      //double max_f;
 
       /* Compute forces (2D only) */
-      max_f = ComputeForces( particles, particles, pv, npart, batch_start, batch_end );
+      ComputeForces( particles, particles, pv, npart );
       /* Compute single max_f for each process and than reduce it to
       global_max_f using MPI_Allreduce */
-      printf("BEFORE REDUCE\n");
-      printf("Max Force: %f\n", max_f);
-
-      MPI_Allreduce(&max_f, &global_max_f, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-      printf("AFTER REDUCE\n");
-      printf("GLOBAL Max Force: %f\n", global_max_f);
+      printf("global_max_f ===> %f\n", global_max_f);
 
       MPI_Barrier(MPI_COMM_WORLD);
 
       /* Once we have the forces, we compute the changes in position */
       sim_t += ComputeNewPos( particles, pv, npart, global_max_f);
     }
-    for (i=0; i<npart; i++)
-      fprintf(stdout,"%.5lf %.5lf\n", particles[i].x, particles[i].y);
 
+    if(rank == 0){
+      /* Only the Master can Print it */
+      for (i=0; i<npart; i++)
+        fprintf(stdout,"%.5lf %.5lf\n", particles[i].x, particles[i].y);
+    }
 
     MPI_Finalize();
     return 0;
@@ -193,12 +137,25 @@ void InitParticles( Particle particles[], ParticleV pv[], int npart )
     }
 }
 
-double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[], int npart, int start, int end )
+double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[], int npart )
 {
   double max_f;
   int i;
   max_f = 0.0;
-  for (i = start; i < end; i++) {
+
+  batch_size = (npart/size);
+  ns_remainder = (npart%size);
+
+  batch_start = batch_size * rank;
+  batch_end = batch_start + batch_size - 1;
+
+  if (rank == size - 1) {
+    batch_end += ns_remainder;
+  }
+
+  printf("Rank: %i, started at %i and ended at %i\n", rank, batch_start, batch_end);
+
+  for (i = batch_start; i < batch_end; i++) {
     int j;
     double xi, yi, mi, rx, ry, mj, r, fx, fy, rmin;
     rmin = 100.0;
@@ -223,6 +180,8 @@ double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[],
     fx = sqrt(fx*fx + fy*fy)/rmin;
     if (fx > max_f) max_f = fx;
   }
+  MPI_Allreduce(&max_f, &global_max_f, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
   return max_f;
 }
 
