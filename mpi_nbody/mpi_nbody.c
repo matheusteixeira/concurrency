@@ -13,7 +13,6 @@
 
 static long seed = DEFAULT;
 double dt, dt_old; /* Alterado de static para global */
-int *buffer, *global_buffer;
 int batch_size, batch_start, batch_end, ns_remainder;
 int rank, size;
 double global_max_f;
@@ -64,15 +63,6 @@ int main(int argc, char **argv)
     double      sim_t;       /* Simulation time */
     int tmp;
 
-    /*function void *calloc(size_t nitems, size_t size) allocates the requested
-    memory and returns a pointer to it. The difference in malloc and calloc is
-    that malloc does not set the memory to zero where as calloc sets allocated
-    memory to zero.
-    https://www.tutorialspoint.com/c_standard_library/c_function_calloc.htm
-    */
-    buffer = calloc(npart, sizeof(int));
-    global_buffer = calloc(npart, sizeof(int));
-
     if(argc != 3){
 	    printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps\n");
 	    exit(1);
@@ -92,19 +82,25 @@ int main(int argc, char **argv)
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     /* Generate the initial values */
-    InitParticles( particles, pv, npart);
+    if(rank == 0){
+      InitParticles( particles, pv, npart);
+    }
     sim_t = 0.0;
 
     while (cnt--) {
-      //double max_f;
-
+      double max_f;
       /* Compute forces (2D only) */
-      ComputeForces( particles, particles, pv, npart );
+      max_f = ComputeForces( particles, particles, pv, npart );
+
       /* Compute single max_f for each process and than reduce it to
       global_max_f using MPI_Allreduce */
-      printf("global_max_f ===> %f\n", global_max_f);
+
+      printf("max_f for rank %i is: %f\n", rank, max_f);
 
       MPI_Barrier(MPI_COMM_WORLD);
+      MPI_Reduce(&max_f, &global_max_f, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+      printf("global_max_f ===> %f\n", global_max_f);
+
 
       /* Once we have the forces, we compute the changes in position */
       sim_t += ComputeNewPos( particles, pv, npart, global_max_f);
@@ -144,7 +140,7 @@ double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[],
   max_f = 0.0;
 
   batch_size = (npart/size);
-  ns_remainder = (npart%size);
+  ns_remainder = (npart % size);
 
   batch_start = batch_size * rank;
   batch_end = batch_start + batch_size - 1;
@@ -180,8 +176,6 @@ double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[],
     fx = sqrt(fx*fx + fy*fy)/rmin;
     if (fx > max_f) max_f = fx;
   }
-  MPI_Allreduce(&max_f, &global_max_f, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
   return max_f;
 }
 
