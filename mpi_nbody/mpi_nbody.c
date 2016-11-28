@@ -14,7 +14,7 @@
 static long seed = DEFAULT;
 double dt, dt_old; /* Alterado de static para global */
 int batch_size, batch_start, batch_end, ns_remainder;
-int rank, size;
+int rank, size, npart;
 double global_max_f;
 
 double Random(void)
@@ -51,17 +51,16 @@ typedef struct {
 } ParticleV;
 
 void InitParticles( Particle[], ParticleV [], int );
-double ComputeForces( Particle [], Particle [], ParticleV [], int );
+void ComputeForces( Particle [], Particle [], ParticleV [], int );
 double ComputeNewPos( Particle [], ParticleV [], int, double);
 
 int main(int argc, char **argv)
 {
     Particle  * particles;   /* Particles */
     ParticleV * pv;          /* Particle velocity */
-    int         npart, i, j;
+    int         i, j;
     int         cnt;         /* number of times in loop */
     double      sim_t;       /* Simulation time */
-    int tmp;
 
     if(argc != 3){
 	    printf("Wrong number of parameters.\nUsage: nbody num_bodies timesteps\n");
@@ -77,31 +76,18 @@ int main(int argc, char **argv)
     particles = (Particle *) malloc(sizeof(Particle)*npart);
     pv = (ParticleV *) malloc(sizeof(ParticleV)*npart);
 
+    InitParticles( particles, pv, npart);
+
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    /* Generate the initial values */
-    if(rank == 0){
-      InitParticles( particles, pv, npart);
-    }
     sim_t = 0.0;
 
     while (cnt--) {
-      double max_f;
+      ComputeForces( particles, particles, pv, npart );
       /* Compute forces (2D only) */
-      max_f = ComputeForces( particles, particles, pv, npart );
-
-      /* Compute single max_f for each process and than reduce it to
-      global_max_f using MPI_Allreduce */
-
-      printf("max_f for rank %i is: %f\n", rank, max_f);
-
       MPI_Barrier(MPI_COMM_WORLD);
-      MPI_Reduce(&max_f, &global_max_f, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-      printf("global_max_f ===> %f\n", global_max_f);
-
-
       /* Once we have the forces, we compute the changes in position */
       sim_t += ComputeNewPos( particles, pv, npart, global_max_f);
     }
@@ -133,7 +119,7 @@ void InitParticles( Particle particles[], ParticleV pv[], int npart )
     }
 }
 
-double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[], int npart )
+void ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[], int npart )
 {
   double max_f;
   int i;
@@ -176,7 +162,7 @@ double ComputeForces( Particle myparticles[], Particle others[], ParticleV pv[],
     fx = sqrt(fx*fx + fy*fy)/rmin;
     if (fx > max_f) max_f = fx;
   }
-  return max_f;
+  MPI_Allreduce(&max_f, &global_max_f, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 }
 
 double ComputeNewPos( Particle particles[], ParticleV pv[], int npart, double max_f)
@@ -187,7 +173,8 @@ double ComputeNewPos( Particle particles[], ParticleV pv[], int npart, double ma
   a0	 = 2.0 / (dt * (dt + dt_old));
   a2	 = 2.0 / (dt_old * (dt + dt_old));
   a1	 = -(a0 + a2);
-  for (i=0; i<npart; i++) {
+
+  for (i = 0; i < npart; i++) {
     double xi, yi;
     xi	           = particles[i].x;
     yi	           = particles[i].y;
