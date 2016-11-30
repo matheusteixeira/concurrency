@@ -178,7 +178,7 @@ double ComputeForces( void *thread_data )
     yi   = myparticles[i].y;
     fx   = 0.0;
     fy   = 0.0;
-    for (j= start; j < end; j++) {
+    for (j= 0; j < npart; j++) {
       rx = xi - others[j].x;
       ry = yi - others[j].y;
       mj = others[j].mass;
